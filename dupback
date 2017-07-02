@@ -1,0 +1,399 @@
+#!/usr/bin/env python3
+#
+# FILENAME:     dupback
+# AUTHOR:       Bennett Samowich <bennett@foolean.org>
+# DESCRIPTION:
+#
+# 	A configuration file backed wrapper for duplicity
+#
+#	The primary purpose of 'dupback' is to provide the ability to place the
+#   the commonly used duplicity arguments into a configuration file, thus
+#   simplifying the overall user interface.
+#
+#   (if only duplicity itself could use a configuration file)
+#
+#   Example:
+#       dupback [options] [full|incremental] source_dir target_url
+#       dupback [options] restore target_dir file_or_dir_to_restore
+#       dupback [options] verify source_url target_dir
+#       dupback [options] status target_url
+#       dupback [options] list target_url
+#       dupback [options] cleanup target_url
+#       dupback [options] rm time target_url
+#       dupback [options] frm count target_url
+#       dupback [options] irm count target_url
+
+from optparse import OptionParser, OptionGroup
+from subprocess import call
+import ast
+import configparser
+import getpass
+import os
+import pprint
+import re
+import signal
+import socket
+import sys
+import syslog
+
+VERSION = '1.0.0'
+
+DEFAULT_CONFIG_FILE = '/etc/dupback/dupback.conf'
+
+#   Expand any inline macros found within a string.
+def expand_macros(string):
+    # Expand '%HOSTNAME%' to hostname
+    string = re.sub('%HOSTNAME%', socket.gethostname(), string)
+
+    # Expand '%USERNAME%' to username
+    string = re.sub('%USERNAME%', getpass.getuser(), string)
+
+    # Return the expanded string
+    return string
+
+#   Helper function to log/print debugging messages
+def debug(string):
+    if CONFIG['dupback']['debug'] is True:
+        logprint("debug: %s" % (string))
+
+#   Helper function to log/print non-fatal error messages
+def error(string):
+    logprint("error: %s" % (string))
+
+#   Helper function to log/print fatal error messages and exit
+def fatal(string):
+    logprint("fatal: %s" % (string))
+    sys.exit(1)
+
+#   Helper function to log/print general notice messages
+def notice(string):
+    logprint("notice: %s" % (string))
+
+#   Helper function to log/print warning messages
+def warning(string):
+    logprint("warning: %s" % (string))
+
+#   Helper function to log and print messages.  Generally
+#   this will be called by the functions debug, error, fatal,
+#   notice, and warning.
+def logprint(string):
+    syslog.syslog(string)
+    print(string)
+
+#   Helper function to catch SIGINT
+def signal_handler(signal, frame):
+    notice('caught sigint')
+    clean_exit()
+
+#   Helper function to clean up and exit gracefully
+def clean_exit():
+    lockfile = CONFIG['duplicity']['archive-dir'] + '/' + CONFIG['duplicity']['name'] + '/lockfile.lock'
+    if os.path.exists(lockfile):
+        notice('cleaning up "%s"' % (lockfile))
+        os.remove(lockfile)
+    sys.exit(0)
+
+#   Parse the command-line options and the configuration file
+def parse_options():
+    usage = """usage:
+    %prog [options] [full|incremental] source_dir target_url
+    %prog [options] restore target_dir file_or_dir_to_restore
+    %prog [options] verify source_url target_dir
+    %prog [options] status target_url
+    %prog [options] list target_url
+    %prog [options] cleanup target_url
+    %prog [options] rm time target_url
+    %prog [options] frm count target_url
+    %prog [options] irm count target_url
+    """
+    parser = OptionParser(usage=usage, version="%prog " + VERSION)
+    parser.disable_interspersed_args()
+
+    # Command-line options for dupback itself
+    group = OptionGroup(parser, 'Dupback options')
+    group.add_option(
+        '-C', '--config',
+        dest='config-file',
+        default=DEFAULT_CONFIG_FILE,
+        help = 'Specify an alternate configuration file [default=%default]'
+    )
+    group.add_option(
+        '-D', '--debug',
+        dest    = 'debug',
+        action  = 'store_true',
+        default = False,
+        help    = 'Print extra debugging information'
+    )
+    parser.add_option_group(group)
+
+    # Command-line options that will be passed through to duplicity
+    group = OptionGroup(parser, 'Duplicty options (passed through to duplicitiy)')
+    group.add_option( '--allow-source-mismatch', dest = 'allow-source-mismatch', action = 'store_true', default = None )
+    group.add_option( '--archive-dir', dest = 'archive-dir', default = None )
+    group.add_option( '--asynchronous-upload', dest = 'asynchronous-upload', action = 'store_true', default = None )
+    group.add_option( '--compare-data', dest = 'compare-data', action = 'store_true', default = None )
+    group.add_option( '--dry-run', dest = 'dry-run', action = 'store_true', default = None )
+    group.add_option( '--encrypt-key', dest = 'encrypt-key', action = 'append', default = None )
+    group.add_option( '--encrypt-secret-keyring', dest = 'encrypt-secret-keyring', default = None )
+    group.add_option( '--encrypt-sign-key', dest = 'encrypt-sign_key', default = None )
+    group.add_option( '--exclude', dest = 'exclude', action = 'append', default = None )
+    group.add_option( '--exclude-device-files', dest = 'exclude-device-files', action = 'store_true', default = None )
+    group.add_option( '--exclude-filelist', dest = 'exclude-filelist', default = None )
+    group.add_option( '--exclude-if-present', dest = 'exclude-if-present', default = None )
+    group.add_option( '--exclude-other-filesystems', dest = 'exclude-other-filesystems', action = 'store_true', default = None )
+    group.add_option( '--exclude-regexp', dest = 'exclude-regexp', default = None )
+    group.add_option( '--exclude-older-than', dest = 'exclude-older-than', default = None )
+    group.add_option( '--extra-clean', dest = 'extra-clean', action = 'store_true', default = None )
+    group.add_option( '--file-prefix', dest = 'file-prefix', default = None )
+    group.add_option( '--file-prefix-manifest', dest = 'file-prefix-manifest', default = None )
+    group.add_option( '--file-prefix-archive', dest = 'file-prefix-archive', default = None )
+    group.add_option( '--file-prefix-signature', dest = 'file-prefix-signature', default = None )
+    group.add_option( '--file-to-restore', dest = 'file-to-restore', default = None )
+    group.add_option( '--force', dest = 'force', action = 'store_true', default = None )
+    group.add_option( '--ftp-passive', dest = 'ftp-passive', action = 'store_true', default = None )
+    group.add_option( '--ftp-regular', dest = 'ftp-regular', action = 'store_true', default = None )
+    group.add_option( '--full-if-older-than', dest = 'full-if-older-than', default = None )
+    group.add_option( '--gio', dest = 'gio', action = 'store_true', default = None )
+    group.add_option( '--gpg-binary', dest = 'gpg-binary', default = None )
+    group.add_option( '--gpg-options', dest = 'gpg-options', default = None )
+    group.add_option( '--hidden-encrypt-key', dest = 'hidden-encrypt-key', default = None )
+    group.add_option( '--ignore-errors', dest = 'ignore-errors', action = 'store_true', default = None )
+    group.add_option( '--imap-full-address', dest = 'imap-full-address', action = 'store_true', default = None )
+    group.add_option( '--imap-mailbox', dest = 'imap-mailbox', default = None )
+    group.add_option( '--include', dest = 'include', action = 'append', default = None )
+    group.add_option( '--include-filelist', dest = 'include-filelist', default = None )
+    group.add_option( '--include-regexp', dest = 'include-regexp', default = None )
+    group.add_option( '--log-fd', dest = 'log-fd', default = None )
+    group.add_option( '--log-file', dest = 'log-file', default = None )
+    group.add_option( '--max-blocksize', dest = 'max-blocksize', default = None )
+    group.add_option( '--name', dest = 'name', default = None )
+    group.add_option( '--no-encryption', dest = 'no-encryption', action = 'store_true', default = None )
+    group.add_option( '--no-compression', dest = 'no-compression', action = 'store_true', default = None )
+    group.add_option( '--no-print-statistics', dest = 'no-print-statistics', action = 'store_true', default = None )
+    group.add_option( '--null-separator', dest = 'null-separator', action = 'store_true', default = None )
+    group.add_option( '--num-retries', dest = 'num-retries', default = None )
+    group.add_option( '--numeric-owner', dest = 'numeric-owner', action = 'store_true', default = None )
+    group.add_option( '--old-filenames', dest = 'old-filenames', action = 'store_true', default = None )
+    group.add_option( '--par2-redundancy', dest = 'par2-redundancy', default = None )
+    group.add_option( '--par2-options', dest = 'par2-options', default = None )
+    group.add_option( '--progress', dest = 'progress', action = 'store_true', default = None )
+    group.add_option( '--progress-rate', dest = 'progress-rate', default = None )
+    group.add_option( '--pydevd', dest = 'pydevd', action = 'store_true', default = None )
+    group.add_option( '--rename', dest = 'rename', default = None )
+    group.add_option( '--time', dest = 'time', default = None )
+    group.add_option( '--rsync-options', dest = 'rsync-options', default = None )
+    group.add_option( '--s3-european-buckets', dest = 's3-european-buckets', action = 'store_true', default = None )
+    group.add_option( '--s3-use-rrs', dest = 's3-use-rrs', action = 'store_true', default = None )
+    group.add_option( '--s3-use-ia', dest = 's3-use-ia', action = 'store_true', default = None )
+    group.add_option( '--s3-use-new-style', dest = 's3-use-new_style', action = 'store_true', default = None )
+    group.add_option( '--s3-unencrypted-connection', dest = 's3-unencrypted-connection', action = 'store_true', default = None )
+    group.add_option( '--s3-multipart-chunk-size', dest = 's3-multipart-chunk_size', default = None )
+    group.add_option( '--s3-multipart-max-procs', dest = 's3-multipart-max-procs', default = None )
+    group.add_option( '--s3-multipart-max-timeout', dest = 's3-multipart-max-timeout', default = None )
+    group.add_option( '--s3-use-multiprocessing', dest = 's3-use-multiprocessing', action = 'store_true', default = None )
+    group.add_option( '--s3-use-server-side-encryption', dest = 's3-use-server-side-encryption', action = 'store_true', default = None )
+    group.add_option( '--scp-command', dest = 'scp-command', default = None )
+    group.add_option( '--sftp-command', dest = 'sftp-command', default = None )
+    group.add_option( '--cf-backend', dest = 'cf-backend', default = None )
+    group.add_option( '--short-filenames', dest = 'short-filenames', action = 'store_true', default = None )
+    group.add_option( '--sign-key', dest = 'sign-key', default = None )
+    group.add_option( '--ssh-askpass', dest = 'ssh-askpass', action = 'store_true', default = None )
+    group.add_option( '--ssh-options', dest = 'ssh-options', default = None )
+    group.add_option( '--ssl-cacert-file', dest = 'ssl-cacert-file', default = None )
+    group.add_option( '--ssl-no-check-certificate', dest = 'ssl-no-check-certificate', action = 'store_true', default = None )
+    group.add_option( '--tempdir', dest = 'tempdir', default = None )
+    group.add_option( '--timeout', dest = 'timeout', default = None )
+    group.add_option( '--time-separator', dest = 'time-separator', default = None )
+    group.add_option( '--use-agent', dest = 'use-agent', action = 'store_true', default = None )
+    group.add_option( '--verbosity', dest = 'verbosity', default = None )
+    #group.add_option( '--version', dest = 'version', action = 'store_true', default = None )
+    group.add_option( '--volsize', dest = 'volsize', default = None )
+    group.add_option( '--file-changed', dest = 'file-changed', default = None )
+    parser.add_option_group(group)
+
+    # Parse the options
+    (opts, args) = parser.parse_args()
+    OPTIONS = vars(opts)
+
+    # Address any positional arguments
+    # FIXME: this needs to be made more elegant
+    num_args = len(args)
+    if num_args > 0:
+        # Expand any short-commands
+        args[0] = interpolate_command(args[0])
+            
+        if args[0] in ['full','incremental']:
+            OPTIONS['command'] = args[0]
+            if num_args >= 2:
+                OPTIONS['source']  = args[1]
+            if num_args >= 3:
+                OPTIONS['target']  = args[2]
+        elif args[0] in ['restore', 'verify']:
+            OPTIONS['command'] = args[0]
+            if num_args >= 2:
+                OPTIONS['target']  = args[1]
+            if num_args >= 3:
+                OPTIONS['object']  = args[2]
+                OPTIONS['file-to-restore'] = args[2].strip('/')
+        elif args[0] in ['remove-all-but-n-full','remove-all-inc-of-but-n-full']:
+            OPTIONS['command'] = args[0]
+            if num_args >= 2:
+                OPTIONS['count']   = args[1]
+            if num_args >= 3:
+                OPTIONS['target']  = args[2] 
+        elif args[0] in ['remove-older-than']:
+            OPTIONS['command'] = args[0]
+            if num_args >= 2:
+                OPTIONS['ttime']    = args[1]
+            if num_args >= 3:
+                OPTIONS['target']  = args[2] 
+        elif args[0] in ['cleanup', 'collection-status', 'list-current-files' ]:
+            OPTIONS['command'] = args[0]
+            if num_args >= 2:
+                OPTIONS['target']  = args[1] 
+        else:
+            if num_args >= 1:
+                OPTIONS['source']  = args[0]
+            if num_args >= 2:
+                OPTIONS['target']  = args[1]
+
+    # Read and parse the configuration file
+    config = configparser.ConfigParser(interpolation=None)
+    try:
+        config.read_file(open(OPTIONS['config-file']))
+    except:
+        fatal("unable to open '%s'" % (OPTIONS['config-file']))
+        sys.exit(1) # should never get here
+
+    # Convert the config object into a dictionary
+    global CONFIG
+    CONFIG = {}
+    CONFIG['duplicity'] = {}
+    CONFIG['dupback'] = {}
+    CONFIG['args'] = {}
+    for section in config.sections():
+        CONFIG[section] = {}
+        for (var,val) in config.items(section):
+            try:
+                CONFIG[section][var] = ast.literal_eval(expand_macros(val))
+            except:
+                CONFIG[section][var] = expand_macros(val)
+
+    # Override the configuration options from the command-line
+    for key in OPTIONS:
+        if not OPTIONS[key] is None:
+            if key in [ 'command', 'count', 'object', 'source', 'target', 'ttime' ]:
+                CONFIG['args'][key] = OPTIONS[key]
+            elif key in [ 'config-file', 'debug' ]:
+                CONFIG['dupback'][key] = OPTIONS[key]
+            else:
+                CONFIG['duplicity'][key] = OPTIONS[key]
+
+    # Source and target are reversed duing restore and verify operations
+    if not 'source' in CONFIG['args']:
+        CONFIG['args']['source'] = CONFIG['dupback']['source']
+        if 'command' in CONFIG['args']:
+            if CONFIG['args']['command'] in [ 'restore', 'verify' ]:
+                CONFIG['args']['source'] = CONFIG['dupback']['target']
+
+    if not 'target' in CONFIG['args']:
+        CONFIG['args']['target'] = CONFIG['dupback']['target']
+        if 'command' in CONFIG['args']:
+            if CONFIG['args']['command'] in [ 'restore', 'verify' ]:
+                CONFIG['args']['target'] = CONFIG['dupback']['source']
+
+    # Convert the source path to a name, if we don't already have one
+    if not 'name' in CONFIG['duplicity']:
+        CONFIG['duplicity']['name'] = re.sub('^/', '@', CONFIG['dupback']['source'])
+        CONFIG['duplicity']['name'] = re.sub('/', '-', CONFIG['duplicity']['name'])
+
+    return
+
+#   Duplicity uses long commands so we'll interpolate shorter versions.
+#   e.g. status instead of collection status
+def interpolate_command(command):
+    if command in [ 'clean' ]:
+        return 'cleanup'
+    elif command in [ 'list', 'ls' ]:
+        return 'list-current-files'
+    elif command in [ 'rm' ]:
+        return 'remove-older-than'
+    elif command in [ 'frm' ]:
+        return 'remove-all-but-n-full'
+    elif command in [ 'irm' ]:
+        return 'remove-all-inc-of-but-n-full'
+    elif command in [ 'status', 'stat', 'st' ]:
+        return 'collection-status'
+    else:
+        return command
+
+def add_options():
+    # ... add the "options"
+    opts = []
+    for key, val in sorted(CONFIG['duplicity'].items(), reverse=True):
+        if isinstance(CONFIG['duplicity'][key], bool):
+            if CONFIG['duplicity'][key]:
+                opts.extend([ '--'+key ])
+        elif isinstance(CONFIG['duplicity'][key], list):
+            for val in CONFIG['duplicity'][key]:
+                opts.extend([ '--'+key+"="+val ])
+        else:
+            opts.append( "--%s=%s" % (key, CONFIG['duplicity'][key]))
+
+    return opts
+
+#   Primary application processing
+def main():
+    signal.signal(signal.SIGINT, signal_handler)
+    syslog.openlog(os.path.basename(sys.argv[0]),logoption=syslog.LOG_PID)
+    parse_options() # Load our configuration options
+
+    # Show our configurations (debugging)
+    pp = pprint.PrettyPrinter(indent=4)
+    if CONFIG['dupback']['debug']:
+        print('Configuration matrix:')
+        pp.pprint(CONFIG)
+
+    # Assemble the positional arguments for duplicity
+    if 'command' in CONFIG['args']:
+        if CONFIG['args']['command'] in [ 'full', 'incremental' ]:
+            POS_ARGS = [ CONFIG['args']['source'], CONFIG['args']['target']+"/"+CONFIG['duplicity']['name'] ]
+
+        elif CONFIG['args']['command'] in [ 'collection-status', 'cleanup', 'list-current-files' ]:
+            POS_ARGS = [ CONFIG['args']['target']+"/"+CONFIG['duplicity']['name'] ]
+
+        elif CONFIG['args']['command'] in [ 'remove-older-than' ]:
+            POS_ARGS = [ CONFIG['args']['ttime'], CONFIG['args']['target']+"/"+CONFIG['duplicity']['name'] ]
+
+        elif CONFIG['args']['command'] in [ 'remove-all-but-n-full', 'remove-all-inc-of-but-n-full' ]:
+            POS_ARGS = [ CONFIG['args']['count'], CONFIG['args']['target']+"/"+CONFIG['duplicity']['name'] ]
+
+        elif CONFIG['args']['command'] in [ 'restore', 'verify' ]:
+            del CONFIG['duplicity']['exclude']
+            os.makedirs( CONFIG['args']['target'] + os.path.dirname(CONFIG['args']['object']) )
+            POS_ARGS = [ CONFIG['args']['source']+"/"+CONFIG['duplicity']['name'], CONFIG['args']['target']+CONFIG['args']['object'] ]
+    else:
+        POS_ARGS = [ CONFIG['args']['source'], CONFIG['args']['target']+"/"+CONFIG['duplicity']['name'] ]
+
+    # Assemble the duplicity command
+    dup = [ 'duplicity' ]
+
+    # ... add the "command"
+    if 'command' in CONFIG['args']:
+        dup.extend([ CONFIG['args']['command'] ])
+
+    # ... add the duplicity options and positional arguments
+    dup.extend(add_options())
+    dup.extend(POS_ARGS)
+
+    # Show what we're going to run (debugging)
+    if CONFIG['dupback']['debug']:
+        print('Duplicity command:')
+        pp.pprint(dup)
+
+    # Run duplicity
+    call(dup)
+
+if __name__ == '__main__':
+    main()
+    clean_exit()

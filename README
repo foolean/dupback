@@ -1,0 +1,42 @@
+# dupback - A configuration file backed wrapper for duplicity
+
+The primary purpose of 'dupback' is to provide the ability to place the
+the commonly used duplicity arguments into a configuration file, thus
+simplifying the overall user interface.
+
+(if only duplicity itself could use a configuration file)
+
+Example:
+    dupback [options] [full|incremental] source_dir target_url
+    dupback [options] restore target_dir file_or_dir_to_restore
+    dupback [options] verify source_url target_dir
+    dupback [options] status target_url
+    dupback [options] list target_url
+    dupback [options] cleanup target_url
+    dupback [options] rm time target_url
+    dupback [options] frm count target_url
+    dupback [options] irm count target_url
+
+
+INSTALLATION
+------------
+
+For now, installation is a manual process.
+
+    # Create the configuration directory
+    mkdir /etc/dupback
+    chown root.root /etc/dupback
+    chmod 750 /etc/dupback
+
+    # Create the configuration file
+    cp dupback.conf /etc/dupback
+    chown root.root /etc/dupback/dupback.conf
+    chmod 640 /etc/dupback/dupback.conf
+    # (modify dupback.conf as neccessary)
+
+    # Copy the dupback script
+    cp dupback /usr/sbin
+    chown root.root /usr/sbin/dupback
+    chmod 750 /usr/sbin/dupback
+
+
