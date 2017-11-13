@@ -23,6 +23,7 @@
 #       dupback [options] frm count target_url
 #       dupback [options] irm count target_url
 
+from datetime import date
 from optparse import OptionParser, OptionGroup
 from subprocess import call
 import ast
@@ -36,7 +37,7 @@ import socket
 import sys
 import syslog
 
-VERSION = '1.0.0'
+VERSION = '1.0.1'
 
 DEFAULT_CONFIG_FILE = '/etc/dupback/dupback.conf'
 
@@ -47,6 +48,12 @@ def expand_macros(string):
 
     # Expand '%USERNAME%' to username
     string = re.sub('%USERNAME%', getpass.getuser(), string)
+
+    # Expand '%YEAR%' into the current 4-digit year
+    string = re.sub('%YEAR%', '%04d' % (date.today().year), string)
+
+    # Expand '%MONTH%' into the current 2-digit month
+    string = re.sub('%MONTH%', '%02d' % (date.today().month), string)
 
     # Return the expanded string
     return string
