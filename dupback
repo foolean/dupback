@@ -29,6 +29,7 @@ from subprocess import call
 import ast
 import configparser
 import getpass
+import glob
 import os
 import pprint
 import re
@@ -130,6 +131,13 @@ def parse_options():
         action  = 'store_true',
         default = False,
         help    = 'Print extra debugging information'
+    )
+    group.add_option(
+        '--clean-stale-work-files',
+        dest    = 'clean-stale-work-files',
+        action  = 'store_true',
+        default = False,
+        help    = 'Clean up stale lock and .part files',
     )
     parser.add_option_group(group)
 
@@ -291,7 +299,7 @@ def parse_options():
         if not OPTIONS[key] is None:
             if key in [ 'command', 'count', 'object', 'source', 'target', 'ttime' ]:
                 CONFIG['args'][key] = OPTIONS[key]
-            elif key in [ 'config-file', 'debug' ]:
+            elif key in [ 'config-file', 'debug', 'clean-stale-work-files' ]:
                 CONFIG['dupback'][key] = OPTIONS[key]
             else:
                 CONFIG['duplicity'][key] = OPTIONS[key]
@@ -349,6 +357,57 @@ def add_options():
 
     return opts
 
+def is_duplicity_running():
+    # Get the list of running processes
+    pids = [pid for pid in os.listdir('/proc') if pid.isdigit()]
+
+    # Iterate over the list of running processes
+    for pid in pids:
+        try:
+            handle = open(os.path.join('/proc', pid, 'cmdline'), 'r')
+        except:
+            continue
+
+        try:
+            cmdline = handle.read().split('\0')
+            handle.close()
+        except IOError:
+            continue
+
+        # Duplicity shows as 'python2 /usr/bin/duplicity'
+        # therefore we must check the second argument to
+        # determine if duplicity is running
+        if len(cmdline) >= 2:
+            if os.path.basename(cmdline[1]) == 'duplicity':
+                return True
+
+    # We have exhausted all running processes and didn't find duplicity
+    return False
+
+
+# Determine if there is a lock file in the local cache
+def has_lockfile():
+
+    lockfiles = [ 'lockfile', 'lockfile.lock' ]
+
+    for lockfile in lockfiles:
+        lock = os.path.join(CONFIG['duplicity']['archive-dir'], '@', lockfile)
+        if os.path.isfile(lock):
+            return lock
+
+    # Didn't find any lock files
+    return
+
+
+# Determine if there are any .part files in the local cache
+def has_part_files():
+    entries = glob.glob(os.path.join(CONFIG['duplicity']['archive-dir'], '@', '*.part'))
+    for entry in entries:
+        if not os.path.isfile(entry):
+            entries.remove(entry)
+
+    return entries
+
 #   Primary application processing
 def main():
     signal.signal(signal.SIGINT, signal_handler)
@@ -397,6 +456,20 @@ def main():
     if CONFIG['dupback']['debug']:
         print('Duplicity command:')
         pp.pprint(dup)
+
+    # Clean up latent files left behind by a previous run
+    if CONFIG['dupback']['clean-stale-work-files'] is True:
+        if is_duplicity_running() is False:
+            lockfile = has_lockfile()
+            if lockfile is not None:
+                notice('removing latent lock file "%s"' % (lockfile))
+                os.remove(lockfile)
+
+            partfiles = has_part_files()
+            if len(partfiles) > 0:
+                for partfile in partfiles:
+                    notice('removing latent .part file "%s"' % (partfile))
+                    os.remove(partfile)
 
     # Run duplicity
     call(dup)
