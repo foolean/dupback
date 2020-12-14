@@ -139,6 +139,12 @@ def parse_options():
         default = False,
         help    = 'Clean up stale lock and .part files',
     )
+    group.add_option(
+        '--alt-source',
+        dest='source',
+        default=None,
+        help='Specify alternate source for restores (e.g. sftp://user@backuphost/path/to/backupdir)',
+    )
     parser.add_option_group(group)
 
     # Command-line options that will be passed through to duplicity
